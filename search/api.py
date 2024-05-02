@@ -1,6 +1,6 @@
 """ search business logic implementations """
-
-from datetime import datetime
+import logging
+from datetime import datetime, date
 
 from django.conf import settings
 
@@ -11,7 +11,7 @@ from .utils import DateRange
 
 # Default filters that we support, override using COURSE_DISCOVERY_FILTERS setting if desired
 DEFAULT_FILTER_FIELDS = ["org", "modes", "language"]
-
+log = logging.getLogger(__name__)
 
 def course_discovery_filter_fields():
     """
@@ -86,35 +86,48 @@ def course_discovery_search(search_term=None, size=20, from_=0, field_dictionary
     """
     Course Discovery activities against the search engine index of course details
     """
-    # We'll ignore the course-enrollemnt informaiton in field and filter
-    # dictionary, and use our own logic upon enrollment dates for these
     use_search_fields = ["org"]
     (search_fields, _, exclude_dictionary) = SearchFilterGenerator.generate_field_filters()
-    use_field_dictionary = {
-        field: search_fields[field]
-        for field in search_fields if field in use_search_fields
-    }
+    use_field_dictionary = {field: search_fields[field] for field in search_fields if field in use_search_fields}
+    log.info("field_dictionary------ %s", field_dictionary)
+    log.info("exclude_dictionary------ %s", exclude_dictionary)
     if field_dictionary:
         use_field_dictionary.update(field_dictionary)
+    log.info("use_field_dictionary------------ %s", use_field_dictionary)
+    today = datetime.utcnow()
+    if "estatus" in use_field_dictionary:
+        status_value = use_field_dictionary.pop("estatus")
+        log.info("status_value-------- %s", status_value)        
+        exclude_dictionary["invitation_only"] = False
+        if status_value == "ongoing":
+            use_field_dictionary["start"] = DateRange(None, today)
+            use_field_dictionary["end"] = DateRange(today, None)
+        elif status_value == "upcoming":
+            use_field_dictionary["start"] = DateRange(today, None)
+        elif status_value == "finished":
+            use_field_dictionary["end"] = DateRange(None, today)
+
+        # Handle invitation_only as a potentially additional condition.
+        if status_value == "invitation_only" or 'invitation_only' in status_value.split():
+            use_field_dictionary["invitation_only"] = True
+    
     if not getattr(settings, "SEARCH_SKIP_ENROLLMENT_START_DATE_FILTERING", False):
         use_field_dictionary["enrollment_start"] = DateRange(None, datetime.utcnow())
-
+    
     searcher = SearchEngine.get_search_engine(
         getattr(settings, "COURSEWARE_INFO_INDEX_NAME", "course_info")
     )
     if not searcher:
         raise NoSearchEngineError("No search engine specified in settings.SEARCH_ENGINE")
-
+    log.info("use_field_dictionary--------- %s", use_field_dictionary)
     results = searcher.search(
         query_string=search_term,
         size=size,
         from_=from_,
-        # only show when enrollment start IS provided and is before now
         field_dictionary=use_field_dictionary,
-        # show if no enrollment end is provided and has not yet been reached
         filter_dictionary={"enrollment_end": DateRange(datetime.utcnow(), None)},
         exclude_dictionary=exclude_dictionary,
         aggregation_terms=course_discovery_aggregations(),
     )
-
+    
     return results

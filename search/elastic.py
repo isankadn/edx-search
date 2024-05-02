@@ -11,6 +11,7 @@ from elasticsearch.helpers import bulk, BulkIndexError
 
 from search.search_engine_base import SearchEngine
 from search.utils import ValueRange, _is_iterable
+from datetime import datetime, timezone
 
 # log appears to be standard name used for logger
 log = logging.getLogger(__name__)
@@ -92,8 +93,36 @@ def _translate_hits(es_response):
         Any conversion from ES result syntax into our search engine syntax
         """
         translated_result = copy.copy(result)
-        translated_result["data"] = translated_result.pop("_source")
+        log.info("------ %s", translated_result)
+        data = translated_result.pop("_source")
+        translated_result["data"] = data
         translated_result["score"] = translated_result.pop("_score")
+
+        today = datetime.now(timezone.utc)
+        start_date = datetime.strptime(data.get("start", ""), "%Y-%m-%dT%H:%M:%S%z") if data.get("start") else None
+        end_date = datetime.strptime(data.get("end", ""), "%Y-%m-%dT%H:%M:%S%z") if data.get("end") else None
+        invitation_only = data.get("invitation_only", False)
+
+        if start_date and end_date and not invitation_only:
+            if start_date < today < end_date:
+                data["estatus"] = "ongoing"
+            elif end_date < today:
+                data["estatus"] = "finished"
+            elif end_date > today and start_date > today:
+                data["estatus"] = "upcoming"
+        elif start_date and not end_date and not invitation_only:
+            if start_date > today and not invitation_only:
+                data["estatus"] = "upcoming"
+            elif start_date > today and invitation_only:
+                data["estatus"] = "invitation_only"
+            elif start_date < today and not invitation_only:
+                data["estatus"] = "ongoing"
+        elif start_date and invitation_only:
+            if (start_date < today and invitation_only) or (start_date > today and invitation_only):
+                data["estatus"] = "invitation_only"
+        else:
+            data["estatus"] = "unknown"
+        log.info("translated_result %s", translated_result)
         return translated_result
 
     def translate_agg_bucket(bucket, agg_result):
@@ -108,6 +137,17 @@ def _translate_hits(es_response):
         :return: dict
         """
         agg_item = agg_result[bucket]
+        if bucket == "estatus":
+            terms = {
+                status: len([result for result in es_response["hits"]["hits"] if result["_source"].get("estatus") == status])
+                for status in set(result["_source"].get("estatus") for result in es_response["hits"]["hits"])
+            }
+            total_docs = len(es_response["hits"]["hits"])
+            return {
+                "terms": terms,
+                "total": total_docs,
+                "other": 0
+            }    
         terms = {
             bucket["key"]: bucket["doc_count"]
             for bucket in agg_item["buckets"]
@@ -116,7 +156,7 @@ def _translate_hits(es_response):
             agg_result[_get_total_doc_key(bucket)]["value"]
             + agg_item["sum_other_doc_count"]
             + agg_item["doc_count_error_upper_bound"]
-        )
+        )       
         return {
             "terms": terms,
             "total": total_docs,

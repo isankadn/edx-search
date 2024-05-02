@@ -182,7 +182,7 @@ def course_discovery(request):
                 "page_number": page,
             }
         )
-
+        log.info("field_dictionary------ %s", field_dictionary)
         results = course_discovery_search(
             search_term=search_term,
             size=size,
